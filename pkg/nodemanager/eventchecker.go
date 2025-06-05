@@ -94,9 +94,11 @@ func (ec *EventChecker) Run(ctx context.Context) {
 	ticker := time.NewTicker(ec.updateFrequency)
 	defer ticker.Stop()
 
+	klog.Infof("Starting Azure scheduled event checker for node %s with update frequency %s", ec.nodeName, ec.updateFrequency)
 	for {
 		select {
 		case <-ctx.Done():
+			klog.Infof("Stopping Azure scheduled event checker for node %s", ec.nodeName)
 			return
 		case <-ticker.C:
 			if err := ec.CheckAzureScheduledEvents(context.Background()); err != nil {
@@ -128,6 +130,7 @@ func (ec *EventChecker) CheckAzureScheduledEvents(ctx context.Context) error {
 			Message: "No scheduled events found",
 		}
 		if currentCondition == nil || targetCondition.Status != currentCondition.Status {
+			klog.Infof("No scheduled events found for node %s, updating condition to %s", ec.nodeName, targetCondition.Status)
 			return utilnode.SetNodeCondition(ec.kubeClient, types.NodeName(ec.nodeName), targetCondition)
 		}
 
@@ -136,6 +139,7 @@ func (ec *EventChecker) CheckAzureScheduledEvents(ctx context.Context) error {
 
 	targetCondition := ScheduledEventCondition(*eventResponse)
 	if currentCondition == nil || targetCondition.Message != currentCondition.Message {
+		klog.Infof("Scheduled events found for node %s, updating condition to %s", ec.nodeName, targetCondition.Status)
 		return utilnode.SetNodeCondition(ec.kubeClient, types.NodeName(ec.nodeName), targetCondition)
 	}
 	return nil

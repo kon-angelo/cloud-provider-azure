@@ -25,13 +25,17 @@ import (
 
 	v1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
 	clientset "k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/tools/record"
+	"k8s.io/klog/v2"
+
+	utilnode "sigs.k8s.io/cloud-provider-azure/pkg/util/node"
 )
 
 const (
 	metadataURL   = "http://169.254.169.254/metadata/scheduledevents?api-version=2020-07-01"
-	conditionType = "NodeEvent"
+	conditionType = "ScheduledEvent"
 )
 
 // EventChecker periodically checks for Azure scheduled events and updates the Kubernetes node status accordingly.
@@ -83,7 +87,7 @@ type Event struct {
 	EventSource       EventSource `json:"EventSource"`
 	EventStatus       string      `json:"EventStatus"`
 	EventType         EventType   `json:"EventType"`
-	NotBefore         time.Time   `json:"NotBefore"`
+	NotBefore         string      `json:"NotBefore"`
 	ResourceType      string      `json:"ResourceType"`
 	Resources         []string    `json:"Resources"`
 }
@@ -94,28 +98,32 @@ type EventResponse struct {
 }
 
 // NewEventChecker creates a new EventChecker instance
-func NewEventChecker(nodeName string, kubeClient clientset.Interface, recorder record.EventRecorder, httpClient *http.Client, updateFrequency time.Duration) *EventChecker {
+func NewEventChecker(nodeName string, kubeClient clientset.Interface, httpClient *http.Client, updateFrequency time.Duration) *EventChecker {
+	if httpClient == nil {
+		httpClient = &http.Client{
+			Timeout: 10 * time.Second, // Set a reasonable timeout for HTTP requests
+		}
+	}
 	return &EventChecker{
 		httpClient:      httpClient,
 		nodeName:        nodeName,
 		kubeClient:      kubeClient,
-		recorder:        recorder,
 		updateFrequency: updateFrequency,
 	}
 }
 
 // Run starts the event checker loop that periodically checks for Azure scheduled events
-func (ec *EventChecker) Run(ctx context.Context) error {
+func (ec *EventChecker) Run(ctx context.Context) {
 	ticker := time.NewTicker(ec.updateFrequency)
 	defer ticker.Stop()
 
 	for {
 		select {
 		case <-ctx.Done():
-			return ctx.Err()
+			return
 		case <-ticker.C:
 			if err := ec.CheckAzureScheduledEvents(context.Background()); err != nil {
-				ec.recorder.Eventf(&v1.Node{ObjectMeta: metav1.ObjectMeta{Name: ec.nodeName}}, v1.EventTypeWarning, "ScheduledEventCheckFailed", "Failed to check Azure scheduled events: %v", err)
+				klog.Errorf("Failed to check Azure scheduled events: %v", err)
 			}
 		}
 	}
@@ -124,14 +132,13 @@ func (ec *EventChecker) Run(ctx context.Context) error {
 // CheckAzureScheduledEvents queries the Azure metadata service for scheduled events
 // and updates the Kubernetes node with a custom condition "NodeEvent".
 func (ec *EventChecker) CheckAzureScheduledEvents(ctx context.Context) error {
-	client := &http.Client{Timeout: 2 * time.Second}
 	req, err := http.NewRequest("GET", metadataURL, nil)
 	if err != nil {
 		return err
 	}
 	req.Header.Add("Metadata", "true")
 
-	resp, err := client.Do(req)
+	resp, err := ec.httpClient.Do(req)
 	if err != nil {
 		return err
 	}
@@ -147,31 +154,50 @@ func (ec *EventChecker) CheckAzureScheduledEvents(ctx context.Context) error {
 	}
 
 	if len(result.Events) == 0 {
-		return nil // No events to process
+		err = utilnode.SetNodeCondition(ec.kubeClient, types.NodeName(ec.nodeName), v1.NodeCondition{
+			Type:               conditionType,
+			Status:             v1.ConditionFalse,
+			Reason:             "NoScheduledEvents",
+			Message:            "No scheduled events found",
+			LastHeartbeatTime:  metav1.Now(),
+			LastTransitionTime:
+		})
+
+		return nil
 	}
 
 	node, err := ec.kubeClient.CoreV1().Nodes().Get(ctx, ec.nodeName, metav1.GetOptions{})
 	if err != nil {
 		return err
 	}
-	ec.CleanUpNodeConditions(node)
+	updated := ec.CleanUpNodeConditions(node)
 
 	for _, event := range result.Events {
+		node.Status.Conditions = append(node.Status.Conditions, v1.NodeCondition{
+			Type:               conditionType,
+			Status:             v1.ConditionTrue,
+			LastTransitionTime: metav1.Time{Time: time.Now()},
+			Reason:             ec.conditionReason(event),
+			Message:            ec.conditionMessage(event),
+		})
+		updated = true
 	}
 
-	updated := false
-	for i, cond := range node.Status.Conditions {
-		if cond.Type == "NodeEvent" {
-			node.Status.Conditions[i] = eventCondition
-			updated = true
-			break
-		}
-	}
 	if !updated {
-		node.Status.Conditions = append(node.Status.Conditions, eventCondition)
+		return nil // No new events to update
 	}
 
-	_, err = ec.kubeClient.CoreV1().Nodes().UpdateStatus(context.TODO(), node, metav1.UpdateOptions{})
+	// Update the node status with the new conditions
+
+	// Serialize the updated node status
+	statusBytes, err := json.Marshal(map[string]interface{}{
+		"status": node.Status,
+	})
+	if err != nil {
+		return fmt.Errorf("failed to marshal node status: %w", err)
+	}
+
+	_, err = ec.kubeClient.CoreV1().Nodes().PatchStatus(ctx, ec.nodeName, statusBytes)
 	return err
 }
 
@@ -188,4 +214,12 @@ func (ec *EventChecker) CleanUpNodeConditions(node *v1.Node) bool {
 
 	node.Status.Conditions = newConditions
 	return updated
+}
+
+func (ec *EventChecker) conditionReason(event Event) string {
+	return string(event.EventSource) + "-" + string(event.EventType)
+}
+
+func (ec *EventChecker) conditionMessage(event Event) string {
+	return fmt.Sprintf("Scheduled event: %s, NotBefore: %s, Duration: %d seconds, Description: %s", event.EventID, event.NotBefore, event.DurationInSeconds, event.Description)
 }

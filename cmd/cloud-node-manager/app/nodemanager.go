@@ -19,6 +19,7 @@ package app
 import (
 	"context"
 	"fmt"
+	"net/http"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -135,7 +136,14 @@ func startControllers(ctx context.Context, c *cloudnodeconfig.Config, healthzHan
 		c.WaitForRoutes,
 		c.EnableDeprecatedBetaTopologyLabels)
 
+	eventChecker := nodemanager.NewEventChecker(
+		c.NodeName,
+		c.Client,
+		http.DefaultClient,
+		2*time.Second,
+	)
 	go nodeController.Run(ctx)
+	go eventChecker.Run(ctx)
 
 	check := controllerhealthz.NamedPingChecker(c.NodeName)
 	healthzHandler.AddHealthChecker(check)

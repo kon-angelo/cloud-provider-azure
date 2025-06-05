@@ -86,4 +86,7 @@ type Config struct {
 	// If true, the node will apply beta topology labels.
 	// DEPRECATED: This flag will be removed in a future release.
 	EnableDeprecatedBetaTopologyLabels bool
+
+	// EnableEventChecker if enabled will also run the NodeEventChecker
+	EnableEventChecker bool
 }

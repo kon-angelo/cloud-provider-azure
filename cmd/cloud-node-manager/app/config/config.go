@@ -78,6 +78,9 @@ type Config struct {
 	// Specifies if node information is retrieved via IMDS or ARM.
 	UseInstanceMetadata bool
 
+	// EnableNodeEventChecker if enabled will also run the NodeEventChecker. Can only be set to true if UseInstanceMetadata is also true.
+	EnableNodeEventChecker bool
+
 	// WindowsService should be set to true if cloud-node-manager is running as a service on Windows.
 	// Its corresponding flag only gets registered in Windows builds
 	WindowsService bool
@@ -86,7 +89,4 @@ type Config struct {
 	// If true, the node will apply beta topology labels.
 	// DEPRECATED: This flag will be removed in a future release.
 	EnableDeprecatedBetaTopologyLabels bool
-
-	// EnableEventChecker if enabled will also run the NodeEventChecker
-	EnableEventChecker bool
 }
